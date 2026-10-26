@@ -1,0 +1,179 @@
+pipeline:
+  name: "ai_customer_support_email_rag_pipeline"
+  version: "1.0.0"
+  description: "Deterministic pipeline specification for incoming Gmail processing, AI triage, Pinecone RAG retrieval, threshold-based response generation, and Gmail thread replying."
+
+nodes:
+  - id: "node_01_intake"
+    name: "Gmail Trigger / Test Webhook"
+    type: "trigger"
+    platform_equivalent: "n8n-nodes-base.gmailTrigger"
+    input_contract:
+      protocol: "IMAP / Push Notification / Webhook"
+    output_contract:
+      fields:
+        message_id: "string (RFC 2822 Message-ID, e.g. <abc.123@mail.gmail.com>)"
+        thread_id: "string (Gmail threadId hex string, e.g. 18bb20f5a01)"
+        sender_email: "string (extracted email address)"
+        sender_name: "string (display name if present)"
+        subject: "string"
+        raw_body: "string (plain text or html)"
+        received_timestamp: "ISO 8601 string"
+
+  - id: "node_02_sanitize"
+    name: "Data Sanitization & Cleaning"
+    type: "code"
+    platform_equivalent: "n8n-nodes-base.code"
+    logic:
+      - "Strip leading Re: / Fwd: from subject for search normalization"
+      - "Convert HTML body to normalized plain text if needed"
+      - "Strip quoted reply history to isolate the current message content"
+      - "Validate that body is non-empty (minimum 3 characters)"
+    output_contract:
+      clean_subject: "string"
+      clean_body: "string"
+      is_valid_payload: "boolean"
+
+  - id: "node_03_classify"
+    name: "AI Intent Classifier"
+    type: "llm_structured"
+    platform_equivalent: "n8n-nodes-langchain.openAi"
+    model: "gpt-4o-mini"
+    temperature: 0.1
+    schema:
+      type: "object"
+      properties:
+        is_support_request:
+          type: "boolean"
+          description: "True if email is inquiring about support, billing, bugs, how-to, or account issues. False if spam, sales, cold outreach, or auto-reply."
+        category:
+          type: "string"
+          enum: ["technical_issue", "billing_refund", "account_access", "feature_question", "general_inquiry", "non_support"]
+        urgency:
+          type: "string"
+          enum: ["low", "medium", "high", "critical"]
+        sentiment:
+          type: "string"
+          enum: ["frustrated", "neutral", "positive"]
+        core_query:
+          type: "string"
+          description: "A distilled 1-2 sentence query optimized for semantic search in vector database"
+      required: ["is_support_request", "category", "urgency", "sentiment", "core_query"]
+
+  - id: "node_04_support_gate"
+    name: "Support Request Filter"
+    type: "filter"
+    platform_equivalent: "n8n-nodes-base.if"
+    conditions:
+      - field: "{{ $json.classification.is_support_request }}"
+        operation: "equals"
+        value: true
+    branches:
+      true_path: "node_05_rag_query"
+      false_path: "node_exit_non_support"
+
+  - id: "node_exit_non_support"
+    name: "Non-Support Terminal"
+    type: "action"
+    platform_equivalent: "n8n-nodes-base.noOp"
+    action: "Log ignored non-support email. Do not send response. Mark execution COMPLETED_SKIPPED."
+
+  - id: "node_05_rag_query"
+    name: "Pinecone Knowledge Retrieval (RAG)"
+    type: "vector_search"
+    platform_equivalent: "n8n-nodes-langchain.vectorStorePinecone"
+    embedding_model: "text-embedding-3-small"
+    dimensions: 1536
+    top_k: 3
+    query_text: "{{ $json.classification.core_query }}"
+    output_contract:
+      retrieved_documents:
+        type: "array"
+        items:
+          id: "string"
+          text: "string (knowledge article snippet)"
+          score: "float (cosine similarity, 0.0 - 1.0)"
+          source_title: "string"
+      highest_score: "float"
+
+  - id: "node_06_confidence_gate"
+    name: "Knowledge Sufficiency Guardrail"
+    type: "filter"
+    platform_equivalent: "n8n-nodes-base.if"
+    threshold_score: 0.72
+    conditions:
+      - field: "{{ $json.highest_score }}"
+        operation: "greater_or_equal"
+        value: 0.72
+    branches:
+      true_path: "node_07a_generate_response"
+      false_path: "node_07b_human_escalation"
+
+  - id: "node_07a_generate_response"
+    name: "Context-Grounded Response Generator"
+    type: "llm_generation"
+    platform_equivalent: "n8n-nodes-langchain.openAi"
+    model: "gpt-4o-mini"
+    temperature: 0.3
+    system_prompt: |
+      You are an expert, courteous, and concise customer support representative for our agency.
+      Answer the customer's question STRICTLY based on the provided Knowledge Base snippets.
+      Rules:
+      1. If the knowledge base does not explicitly confirm a detail, do not speculate or promise unconfirmed features.
+      2. Keep the greeting professional and reference their specific inquiry.
+      3. Format with clean bullet points or short paragraphs for readability.
+      4. End with a polite sign-off: 'Best regards, Customer Support Team'.
+    input_context:
+      customer_name: "{{ $json.sender_name }}"
+      inquiry_body: "{{ $json.clean_body }}"
+      knowledge_snippets: "{{ $json.retrieved_documents.map(d => d.text).join('\n---\n') }}"
+    output_contract:
+      draft_response_html: "string"
+      draft_response_text: "string"
+
+  - id: "node_08a_gmail_reply"
+    name: "Gmail Reply Sender (Preserving Thread)"
+    type: "action"
+    platform_equivalent: "n8n-nodes-base.gmail"
+    action: "sendReply"
+    parameters:
+      threadId: "={{ $json.thread_id }}"
+      messageId: "={{ $json.message_id }}"
+      toEmail: "={{ $json.sender_email }}"
+      subject: "=Re: {{ $json.clean_subject }}"
+      body: "={{ $json.draft_response_html || $json.draft_response_text }}"
+      headers:
+        In-Reply-To: "={{ $json.message_id }}"
+        References: "={{ $json.message_id }}"
+      labelsToAdd: ["AI-Answered"]
+    output_contract:
+      sent_message_id: "string"
+      status: "SUCCESS"
+
+  - id: "node_07b_human_escalation"
+    name: "Human Escalation Router"
+    type: "action"
+    platform_equivalent: "n8n-nodes-base.gmail + n8n-nodes-base.httpRequest"
+    actions:
+      - label_gmail:
+          action: "addLabel"
+          threadId: "={{ $json.thread_id }}"
+          labels: ["Needs-Human-Review", "Escalated-AI"]
+      - internal_notification:
+          channel: "Slack / Discord / Support Webhook"
+          message: |
+            ⚠️ Customer Support Escalation Needed
+            - Sender: {{ $json.sender_email }} ({{ $json.sender_name }})
+            - Subject: {{ $json.clean_subject }}
+            - Reason: Knowledge Base similarity score ({{ $json.highest_score }}) below threshold (0.72)
+            - Thread ID: {{ $json.thread_id }}
+            - Core Query: {{ $json.classification.core_query }}
+
+  - id: "node_error_handler"
+    name: "Global Error Boundary"
+    type: "error_trigger"
+    platform_equivalent: "n8n-nodes-base.errorTrigger"
+    actions:
+      - "Log incident with timestamp, node ID, and error message"
+      - "Tag Gmail thread with 'System-Error-Review' label"
+      - "Never send unhandled exception traces to external customers"

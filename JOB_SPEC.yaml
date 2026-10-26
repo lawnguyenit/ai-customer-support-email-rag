@@ -1,0 +1,60 @@
+job:
+  id: portfolio-ai-customer-support-email-rag-2026-10-26
+  title: "n8n AI Automation Specialist - Customer Support Email Workflow (RAG, Pinecone, Gmail, OpenAI)"
+  classification: portfolio_exercise_and_reusable_asset
+  source_brief: "Upwork Brief: AI-powered customer support email workflow with n8n, OpenAI, Pinecone, and Gmail"
+  output_directory: "D:\\Project\\Freelancer\\Test\\AI_Customer_Support_Email_n8n_RAG\\2026-10-26"
+  state: SPEC_APPROVED_EXECUTION_IN_PROGRESS
+
+intent:
+  goal: "Build, document, verify, and package an enterprise-grade AI customer support email automation in n8n with RAG (Pinecone vector search), Gmail thread continuity, strict threshold-based human escalation, and a deterministic offline test simulator."
+  accepted_scope:
+    - "n8n workflow with Gmail Trigger, AI Classification, RAG Knowledge Retrieval, AI Response Generation, Gmail Reply, and Human Escalation routing"
+    - "Preservation of RFC 2822 / 5322 email threading (Thread-ID, In-Reply-To, References headers)"
+    - "Vector similarity gating (score threshold) to prevent hallucination when knowledge is absent or low-confidence"
+    - "Zero-credential local test harness & simulator enabling 100% offline testing of all 7 edge scenarios"
+    - "Production-ready, importable n8n workflow JSON with clean parameterization and no hardcoded secrets"
+    - "Five core handover deliverables mandated by client brief (Design Mapping, Flow Diagram, Test Notes & Checklist, Handover Summary, Workflow JSON)"
+  excluded:
+    - "Hardcoding private API keys or real client secrets into git/JSON"
+    - "Uncontrolled auto-reply without confidence guardrails"
+    - "Direct modification of client production infrastructure without prior staging approval"
+
+integrations:
+  orchestrator:
+    system: "n8n"
+    target_version: ">=1.0.0"
+    execution_modes: ["OFFLINE_SIMULATOR", "LIVE_API"]
+  email_channel:
+    system: "Gmail / Google Workspace"
+    trigger_type: "Gmail Trigger (New Email) / Webhook in test mode"
+    required_metadata: ["sender", "subject", "body", "messageId", "threadId"]
+    reply_mechanism: "Gmail Send Message with Thread-ID and header mapping"
+  classification_and_generation:
+    provider: "OpenAI"
+    classification_model: "gpt-4o-mini (fast, low latency, structured JSON output)"
+    generation_model: "gpt-4o / gpt-4o-mini (context-grounded, customer support tone)"
+    embedding_model: "text-embedding-3-small (1536 dims) or text-embedding-ada-002"
+  knowledge_base:
+    system: "Pinecone Vector Database"
+    index_name: "customer-support-kb"
+    query_top_k: 3
+    similarity_metric: "cosine"
+    confidence_threshold: 0.72
+
+test_scenarios_mandated_by_brief:
+  1_support_with_relevant_kb: "Customer inquires about refund policy -> RAG matches refund doc -> High confidence -> Professional reply sent on thread"
+  2_non_support_email: "Cold sales outreach or spam -> Classified as non_support -> Cleanly filtered out without sending unwanted reply"
+  3_support_with_insufficient_kb: "Customer asks about obscure feature not in KB -> RAG returns low similarity -> Escalated to Human (Label + Notification)"
+  4_gmail_thread_continuity: "Follow-up email in ongoing conversation -> Reply preserves Thread-ID and References -> Renders in same conversation view"
+  5_missing_knowledge_graceful: "Empty knowledge query or out-of-scope question -> Handled without exception or hallucination"
+  6_integration_failure_handling: "OpenAI 429 rate limit or Pinecone timeout -> Caught by error boundary -> Flagged for manual review, zero dropped messages"
+  7_end_to_end_validation: "Complete multi-step execution verified with sanitized audit trail"
+
+deliverables_mandated_by_brief:
+  - "1. Workflow Design & Integration Mapping (docs/WORKFLOW_DESIGN_AND_INTEGRATION_MAPPING.md)"
+  - "2. Process Flow Diagram (docs/PROCESS_FLOW_DIAGRAM.md)"
+  - "3. Testing Notes & Validation Checklist (docs/TESTING_NOTES_AND_VALIDATION_CHECKLIST.md)"
+  - "4. Project Handover Summary (docs/PROJECT_HANDOVER_SUMMARY.md)"
+  - "5. Importable n8n Workflow JSON (v1/ai-customer-support-email-rag.n8n.json)"
+  - "Bonus Developer Heritage: Reusable Simulator, Unit Tests, and Step-by-Step Implementation Guide"

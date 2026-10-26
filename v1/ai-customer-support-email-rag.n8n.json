@@ -1,0 +1,640 @@
+{
+  "name": "AI Customer Support Email Workflow (RAG, Pinecone, Gmail, OpenAI)",
+  "nodes": [
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "CONFIDENCE_THRESHOLD",
+              "value": "0.72"
+            },
+            {
+              "name": "PINECONE_INDEX_HOST",
+              "value": "https://customer-support-kb-1536-example.svc.us-east-1.pinecone.io"
+            },
+            {
+              "name": "SUPPORT_LABEL",
+              "value": "AI-Answered"
+            },
+            {
+              "name": "ESCALATION_LABEL",
+              "value": "Needs-Human-Review"
+            },
+            {
+              "name": "ESCALATION_WEBHOOK_URL",
+              "value": "https://hooks.slack.com/services/EXAMPLE/INTERNAL/ALERT"
+            }
+          ],
+          "number": [
+            {
+              "name": "VECTOR_TOP_K",
+              "value": 3
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1000001-0001-4000-8000-000000000001",
+      "name": "Workflow Settings & Thresholds",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [
+        180,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "readStatus": "unread",
+          "labelIds": [
+            "INBOX"
+          ]
+        },
+        "format": "resolved"
+      },
+      "id": "c1000002-0002-4000-8000-000000000002",
+      "name": "Gmail Trigger (New Incoming Email)",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        400,
+        260
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail_oauth_credential_id",
+          "name": "Google Workspace Gmail OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "path": "test-support-email",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "c1000003-0003-4000-8000-000000000003",
+      "name": "Test Webhook (Offline & Simulator Ingest)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        400,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Node 02: Sanitize and normalize email inputs\nconst item = $input.first().json;\n\n// Handle fields whether from Gmail trigger or Simulator webhook\nconst rawSubject = item.subject || (item.body && item.body.subject) || \"Support Inquiry\";\nconst rawBody = item.text || item.snippet || (item.body && item.body.body) || \"\";\nconst senderEmail = item.from || (item.body && item.body.sender_email) || \"customer@example.com\";\nconst senderName = item.sender_name || (item.body && item.body.sender_name) || senderEmail.split('@')[0];\nconst messageId = item.id || item.message_id || (item.body && item.body.message_id) || `<msg-${Date.now()}@agency.local>`;\nconst threadId = item.threadId || item.thread_id || (item.body && item.body.thread_id) || `thread_${Date.now()}`;\n\n// Clean Re: and Fwd: prefixes\nconst cleanSubject = rawSubject.replace(/^(Re:\\s*|Fwd:\\s*)+/gi, '').trim();\n\n// Strip quoted historical email threads and long signatures\nconst cleanBody = rawBody.split(/(?i)(^>|\\nOn .* wrote:|\\n---|\\nBest regards|\\nThanks,)/)[0].trim();\n\nreturn [{\n  json: {\n    message_id: messageId,\n    thread_id: threadId,\n    sender_email: senderEmail,\n    sender_name: senderName,\n    clean_subject: cleanSubject,\n    clean_body: cleanBody,\n    received_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "c1000004-0004-4000-8000-000000000004",
+      "name": "Sanitize & Normalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.1,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an incoming email classification engine for an agency support desk. Analyze the email subject and body. Return a JSON object with: 1. `is_support_request` (boolean: true if asking for technical help, billing, account access, bug reports, product usage; false if cold sales outreach, spam, recruitment, marketing pitch). 2. `category` (enum: 'technical_issue', 'billing_refund', 'account_access', 'feature_question', 'general_inquiry', 'non_support'). 3. `urgency` (enum: 'low', 'medium', 'high'). 4. `core_query` (distilled 1-2 sentence search phrase optimized for vector search).\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Subject: \" + $json.clean_subject + \"\\n\\nBody: \" + $json.clean_body\n    }\n  ]\n}"
+      },
+      "id": "c1000005-0005-4000-8000-000000000005",
+      "name": "OpenAI Intent Classifier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        360
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai_api_header_cred_id",
+          "name": "OpenAI API Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse JSON payload from OpenAI Classifier\nconst raw = $input.first().json;\nconst prev = $('Sanitize & Normalize Email').first().json;\nlet parsedClassification = {};\n\ntry {\n  const contentStr = raw.choices[0].message.content;\n  parsedClassification = JSON.parse(contentStr);\n} catch (e) {\n  parsedClassification = {\n    is_support_request: true,\n    category: \"general_inquiry\",\n    urgency: \"medium\",\n    core_query: prev.clean_subject\n  };\n}\n\nreturn [{\n  json: {\n    ...prev,\n    classification: parsedClassification\n  }\n}];"
+      },
+      "id": "c1000006-0006-4000-8000-000000000006",
+      "name": "Parse Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000007-0007-4000-8000-000000000007",
+              "leftValue": "={{ $json.classification.is_support_request }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1000007-0007-4000-8000-000000000007",
+      "name": "Is Support Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1340,
+        360
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c1000008-0008-4000-8000-000000000008",
+      "name": "Non-Support Clean Exit (No Reply)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1580,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": $json.classification.core_query\n}"
+      },
+      "id": "c1000009-0009-4000-8000-000000000009",
+      "name": "Generate Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1580,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai_api_header_cred_id",
+          "name": "OpenAI API Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Workflow Settings & Thresholds').first().json.PINECONE_INDEX_HOST + '/query' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"topK\": {{ $('Workflow Settings & Thresholds').first().json.VECTOR_TOP_K }},\n  \"includeMetadata\": true,\n  \"vector\": {{ $json.data[0].embedding }}\n}"
+      },
+      "id": "c1000010-0010-4000-8000-000000000010",
+      "name": "Pinecone Vector Query (RAG)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        240
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "pinecone_api_key_cred_id",
+          "name": "Pinecone API Key Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Evaluate vector search matches and extract highest similarity score\nconst pineconeResult = $input.first().json;\nconst prev = $('Parse Classification').first().json;\nconst threshold = parseFloat($('Workflow Settings & Thresholds').first().json.CONFIDENCE_THRESHOLD);\n\nconst matches = pineconeResult.matches || [];\nlet highestScore = 0.0;\nlet relevantSnippets = [];\n\nif (matches.length > 0) {\n  highestScore = matches[0].score || 0.0;\n  relevantSnippets = matches.map(m => (m.metadata && m.metadata.text) ? m.metadata.text : (m.text || \"\")).filter(t => t.length > 0);\n}\n\nreturn [{\n  json: {\n    ...prev,\n    highest_similarity_score: highestScore,\n    is_knowledge_sufficient: (highestScore >= threshold && relevantSnippets.length > 0),\n    knowledge_snippets: relevantSnippets\n  }\n}];"
+      },
+      "id": "c1000011-0011-4000-8000-000000000011",
+      "name": "Evaluate Similarity & Gating",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2060,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1000012-0012-4000-8000-000000000012",
+              "leftValue": "={{ $json.is_knowledge_sufficient }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1000012-0012-4000-8000-000000000012",
+      "name": "Sufficient Knowledge?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2300,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.2,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an agency customer support assistant. Answer the customer's question strictly and accurately based ONLY on the provided knowledge base snippets. Format clearly with bullet points. If information is not in the knowledge snippets, do not speculate. Maintain a professional, polite, and reassuring tone. Sign off as 'Customer Support Team'.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Customer Name: \" + $json.sender_name + \"\\nCustomer Email: \" + $json.sender_email + \"\\nInquiry: \" + $json.clean_body + \"\\n\\nKnowledge Base Context:\\n\" + $json.knowledge_snippets.join('\\n---\\n')\n    }\n  ]\n}"
+      },
+      "id": "c1000013-0013-4000-8000-000000000013",
+      "name": "AI Response Generator (RAG Grounded)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2560,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai_api_header_cred_id",
+          "name": "OpenAI API Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "toList": [
+          "={{ $('Evaluate Similarity & Gating').first().json.sender_email }}"
+        ],
+        "subject": "=Re: {{ $('Evaluate Similarity & Gating').first().json.clean_subject }}",
+        "message": "={{ $json.choices[0].message.content }}",
+        "options": {
+          "threadId": "={{ $('Evaluate Similarity & Gating').first().json.thread_id }}",
+          "inReplyTo": "={{ $('Evaluate Similarity & Gating').first().json.message_id }}",
+          "references": "={{ $('Evaluate Similarity & Gating').first().json.message_id }}"
+        }
+      },
+      "id": "c1000014-0014-4000-8000-000000000014",
+      "name": "Gmail Reply (Preserving Thread)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2820,
+        140
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail_oauth_credential_id",
+          "name": "Google Workspace Gmail OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "messageLabel",
+        "operation": "add",
+        "messageId": "={{ $json.message_id }}",
+        "labelIds": [
+          "={{ $('Workflow Settings & Thresholds').first().json.ESCALATION_LABEL }}"
+        ]
+      },
+      "id": "c1000015-0015-4000-8000-000000000015",
+      "name": "Tag Gmail Thread (Needs-Human-Review)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2560,
+        360
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail_oauth_credential_id",
+          "name": "Google Workspace Gmail OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Workflow Settings & Thresholds').first().json.ESCALATION_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"⚠️ *Customer Support Escalation Needed*\\n• *Sender*: \" + $json.sender_email + \" (\" + $json.sender_name + \")\\n• *Subject*: \" + $json.clean_subject + \"\\n• *Similarity Score*: \" + $json.highest_similarity_score + \" (Below threshold \" + $('Workflow Settings & Thresholds').first().json.CONFIDENCE_THRESHOLD + \")\\n• *Thread ID*: \" + $json.thread_id + \"\\n• *Core Query*: \" + $json.classification.core_query\n}"
+      },
+      "id": "c1000016-0016-4000-8000-000000000016",
+      "name": "Dispatch Escalation Webhook / Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2820,
+        360
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c1000017-0017-4000-8000-000000000017",
+      "name": "Global Error Boundary",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        180,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Workflow Settings & Thresholds').first().json.ESCALATION_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🚨 *n8n Pipeline Error Triggered*\\n• *Workflow*: \" + $execution.workflow.name + \"\\n• *Execution ID*: \" + $execution.id + \"\\n• *Error Message*: \" + $json.execution.error.message\n}"
+      },
+      "id": "c1000018-0018-4000-8000-000000000018",
+      "name": "Notify Incident Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        640
+      ]
+    }
+  ],
+  "connections": {
+    "Workflow Settings & Thresholds": {
+      "main": [
+        [
+          {
+            "node": "Gmail Trigger (New Incoming Email)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Test Webhook (Offline & Simulator Ingest)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail Trigger (New Incoming Email)": {
+      "main": [
+        [
+          {
+            "node": "Sanitize & Normalize Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Webhook (Offline & Simulator Ingest)": {
+      "main": [
+        [
+          {
+            "node": "Sanitize & Normalize Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize & Normalize Email": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Intent Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Intent Classifier": {
+      "main": [
+        [
+          {
+            "node": "Parse Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Classification": {
+      "main": [
+        [
+          {
+            "node": "Is Support Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Support Request?": {
+      "main": [
+        [
+          {
+            "node": "Generate Query Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Non-Support Clean Exit (No Reply)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Pinecone Vector Query (RAG)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pinecone Vector Query (RAG)": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Similarity & Gating",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Similarity & Gating": {
+      "main": [
+        [
+          {
+            "node": "Sufficient Knowledge?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sufficient Knowledge?": {
+      "main": [
+        [
+          {
+            "node": "AI Response Generator (RAG Grounded)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Tag Gmail Thread (Needs-Human-Review)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Response Generator (RAG Grounded)": {
+      "main": [
+        [
+          {
+            "node": "Gmail Reply (Preserving Thread)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag Gmail Thread (Needs-Human-Review)": {
+      "main": [
+        [
+          {
+            "node": "Dispatch Escalation Webhook / Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Global Error Boundary": {
+      "main": [
+        [
+          {
+            "node": "Notify Incident Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "Customer Support",
+      "createdAt": "2026-10-26T12:00:00.000Z",
+      "updatedAt": "2026-10-26T12:00:00.000Z",
+      "id": "tag_cust_support"
+    },
+    {
+      "name": "RAG AI Agent",
+      "createdAt": "2026-10-26T12:00:00.000Z",
+      "updatedAt": "2026-10-26T12:00:00.000Z",
+      "id": "tag_rag_agent"
+    }
+  ]
+}
